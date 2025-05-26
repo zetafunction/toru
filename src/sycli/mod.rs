@@ -1,25 +1,26 @@
 use anyhow::{bail, Result};
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::process::Command;
 
 #[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Torrent {
-    id: String,
-    name: String,
-    path: String,
-    tracker_urls: Vec<String>,
-    size: usize,
-    files: usize,
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub tracker_urls: Vec<String>,
+    pub size: usize,
+    pub files: usize,
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct File {
-    id: String,
-    torrent_id: String,
-    path: String,
-    size: usize,
+    pub id: String,
+    pub torrent_id: String,
+    pub path: PathBuf,
+    pub size: usize,
 }
 
 pub fn get_torrents() -> Result<Vec<Torrent>> {

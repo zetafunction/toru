@@ -1,13 +1,25 @@
 mod sycli;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Organizes files for an episode into a directory.
+    OrganizeEpisodes(OrganizeEpisodesArgs),
+}
+
+#[derive(Args)]
+struct OrganizeEpisodesArgs {
     /// Base directory to work from.
     #[arg(long)]
     base_dir: PathBuf,
@@ -21,34 +33,39 @@ struct Args {
     files: Vec<PathBuf>,
 }
 
-fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+impl OrganizeEpisodesArgs {
+    fn exec(self) -> anyhow::Result<()> {
+        let to_process = self.files.into_iter().collect::<HashSet<_>>();
 
-    let to_process = args.files.into_iter().collect::<HashSet<_>>();
+        let torrents = sycli::get_torrents()?;
+        let files = sycli::get_files()?;
 
-    let torrents = sycli::get_torrents()?;
-    let files = sycli::get_files()?;
+        eprintln!("got {} torrents and {} files", torrents.len(), files.len());
 
-    eprintln!("Got {} torrents and {} files", torrents.len(), files.len());
+        // TODO: torrent.id is redundant, but meh?
+        let torrents = torrents
+            .into_iter()
+            .map(|torrent| (torrent.id.clone(), torrent))
+            .collect::<HashMap<_, _>>();
 
-    // TODO: torrent.id is redundant, but meh?
-    let torrents = torrents
-        .into_iter()
-        .map(|torrent| (torrent.id.clone(), torrent))
-        .collect::<HashMap<_, _>>();
-
-    // TODO: Punting on the harder problem here: instead, only bother processing torrents with a
-    // single-associated file. Otherwise, this would have to do something a bit more clever to
-    // coalesce entries.
-    let files = files
-        .into_iter()
-        .filter_map(|file| match torrents.get(&file.torrent_id) {
-            Some(torrent) => {
-                if torrent.files == 1 {
-                    if torrent.size == file.size {
-                        let path = torrent.path.join(file.path);
-                        if to_process.contains(&path) {
-                            Some((
+        // TODO: Punting on the harder problem here: instead, only bother processing torrents with a
+        // single-associated file. Otherwise, this would have to do something a bit more clever to
+        // coalesce entries.
+        let files = files
+            .into_iter()
+            .filter_map(|file| if let Some(torrent) = torrents.get(&file.torrent_id) {
+                if torrent.files != 1 {
+                    None
+                } else if torrent.size != file.size {
+                    eprintln!(
+                        "warning: file {} associated with torrent {} but size ({} vs {}) does not match; skipping",
+                        file.path.display(), torrent.id, file.size, torrent.size,
+                    );
+                    None
+                } else {
+                    let path = torrent.path.join(file.path);
+                    if to_process.contains(&path) {
+                        Some((
                                 file.torrent_id.clone(),
                                 sycli::File {
                                     id: file.id,
@@ -56,78 +73,88 @@ fn main() -> anyhow::Result<()> {
                                     path,
                                     size: file.size,
                                 },
-                            ))
-                        } else {
-                            None
-                        }
+                        ))
                     } else {
-                        eprintln!(
-                            "got file {:?} with torrent {:?} but size does not match!",
-                            file, torrent
-                        );
                         None
                     }
-                } else {
-                    None
                 }
-            }
-            None => {
-                eprintln!("got file {:?} with no matching torrent!", file);
+            } else  {
+                eprintln!("warning: file {} has no matching torrent; skipping", file.path.display());
                 None
-            }
-        })
-        .collect::<HashMap<_, _>>();
-
-    eprintln!("Got {files:?} to work on");
-
-    let re =
+            })
+            .collect::<HashMap<_, _>>();
+        let re =
         Regex::new(r"^(?<header>.+?\.S[0-9][0-9])E[0-9][0-9]\..+?\.(?<trailer>(?:720|1080|2160)p\..+?\.WEB-DL.+)\.mkv").unwrap();
 
-    for (torrent_id, file) in files {
-        let Some(file_name) = file.path.file_name().and_then(&OsStr::to_str) else {
-            eprintln!("missing or invalid filename for {:?}; skipping", file);
-            continue;
-        };
-
-        let Some(captures) = re.captures(&file_name) else {
-            eprintln!("unable to extract anything useful from {}", file_name);
-            continue;
-        };
-
-        let dir_name = [
-            captures.name("header").unwrap().as_str(),
-            captures.name("trailer").unwrap().as_str(),
-        ]
-        .join(".");
-
-        let dir_path = args.base_dir.join(dir_name);
-
-        if args.dry_run {
-            eprintln!("Making directory {}", dir_path.display());
+        for (torrent_id, file) in files {
             eprintln!(
-                "Hardlinking {} to {}",
+                "processing file {} for torrent {}...",
                 file.path.display(),
-                dir_path.join(file_name).display()
+                torrent_id
             );
+            let Some(file_name) = file.path.file_name().and_then(OsStr::to_str) else {
+                eprintln!(
+                    "  warning: missing or invalid filename for {:?}; skipping",
+                    file
+                );
+                continue;
+            };
+
+            let Some(captures) = re.captures(file_name) else {
+                eprintln!(
+                    "  warning: unable to extract metadata from {}; skipping",
+                    file_name
+                );
+                continue;
+            };
+
+            let dir_name = [
+                captures.name("header").unwrap().as_str(),
+                captures.name("trailer").unwrap().as_str(),
+            ]
+            .join(".");
+
+            let dir_path = self.base_dir.join(dir_name);
+
+            eprintln!("  making directory {}", dir_path.display());
+            if !self.dry_run {
+                std::fs::create_dir(&dir_path).or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })?;
+            }
             eprintln!(
-                "Updating torrent {} path to {}",
+                "  creating link from {} to original {}",
+                dir_path.join(file_name).display(),
+                file.path.display(),
+            );
+            if !self.dry_run {
+                std::fs::hard_link(&file.path, dir_path.join(file_name))?;
+            }
+            eprintln!(
+                "  updating torrent {} directory to {}",
                 torrent_id,
                 dir_path.display()
             );
-            eprintln!("Unlinking old path {}", file.path.display());
-        } else {
-            std::fs::create_dir(&dir_path).or_else(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
-            std::fs::hard_link(&file.path, dir_path.join(file_name))?;
-            sycli::move_torrent(&torrent_id, &dir_path)?;
-            std::fs::remove_file(&file.path)?;
+            if !self.dry_run {
+                sycli::move_torrent(&torrent_id, &dir_path)?;
+            }
+            eprintln!("  unlinking original path {}", file.path.display());
+            if !self.dry_run {
+                std::fs::remove_file(&file.path)?;
+            }
         }
+        Ok(())
     }
+}
 
-    Ok(())
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::OrganizeEpisodes(args) => args.exec(),
+    }
 }

@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[allow(dead_code)]
@@ -53,6 +53,27 @@ pub fn get_files() -> Result<Vec<File>> {
     Ok(serde_json::from_str(&String::from_utf8(output.stdout)?)?)
 }
 
+pub fn move_torrent(torrent_id: &str, dir_path: &Path) -> Result<()> {
+    let output = Command::new("sycli")
+        .args([
+            "torrent",
+            torrent_id,
+            "move",
+            "--skip-files",
+            dir_path.to_str().ok_or_else(|| anyhow!("uhoh"))?,
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        bail!(
+            "sycli finished with non-zero status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,7 +97,7 @@ mod tests {
         let t: Torrent = serde_json::from_str(json).unwrap();
         assert_eq!(t.id, "1234567890123456789012345678901234567890");
         assert_eq!(t.name, "data.txt",);
-        assert_eq!(t.path, "/tmp");
+        assert_eq!(t.path, Path::new("/tmp"));
         assert_eq!(t.tracker_urls, &["example.com"]);
         assert_eq!(t.size, 88888888);
         assert_eq!(t.files, 1);
@@ -97,7 +118,7 @@ mod tests {
         let f: File = serde_json::from_str(json).unwrap();
         assert_eq!(f.id, "0123456789012345678901234567890123456789");
         assert_eq!(f.torrent_id, "1234567890123456789012345678901234567890");
-        assert_eq!(f.path, "data.txt");
+        assert_eq!(f.path, Path::new("data.txt"));
         assert_eq!(f.size, 88888888);
     }
 }

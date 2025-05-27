@@ -1,7 +1,9 @@
 mod sycli;
 
 use clap::Parser;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -77,6 +79,55 @@ fn main() -> anyhow::Result<()> {
         .collect::<HashMap<_, _>>();
 
     eprintln!("Got {files:?} to work on");
+
+    let re =
+        Regex::new(r"^(?<header>.+?\.S[0-9][0-9])E[0-9][0-9]\..+?\.(?<trailer>(?:720|1080|2160)p\..+?\.WEB-DL.+)\.mkv").unwrap();
+
+    for (torrent_id, file) in files {
+        let Some(file_name) = file.path.file_name().and_then(&OsStr::to_str) else {
+            eprintln!("missing or invalid filename for {:?}; skipping", file);
+            continue;
+        };
+
+        let Some(captures) = re.captures(&file_name) else {
+            eprintln!("unable to extract anything useful from {}", file_name);
+            continue;
+        };
+
+        let dir_name = [
+            captures.name("header").unwrap().as_str(),
+            captures.name("trailer").unwrap().as_str(),
+        ]
+        .join(".");
+
+        let dir_path = args.base_dir.join(dir_name);
+
+        if args.dry_run {
+            eprintln!("Making directory {}", dir_path.display());
+            eprintln!(
+                "Hardlinking {} to {}",
+                file.path.display(),
+                dir_path.join(file_name).display()
+            );
+            eprintln!(
+                "Updating torrent {} path to {}",
+                torrent_id,
+                dir_path.display()
+            );
+            eprintln!("Unlinking old path {}", file.path.display());
+        } else {
+            std::fs::create_dir(&dir_path).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+            std::fs::hard_link(&file.path, dir_path.join(file_name))?;
+            sycli::move_torrent(&torrent_id, &dir_path)?;
+            std::fs::remove_file(&file.path)?;
+        }
+    }
 
     Ok(())
 }

@@ -11,6 +11,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Moves a file or directory to a new location.
+    Move(subcommands::MoveArgs),
     /// Organizes files for an episode into a directory.
     OrganizeEpisodes(subcommands::OrganizeEpisodesArgs),
 }
@@ -19,6 +21,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Move(args) => args.exec(),
         Commands::OrganizeEpisodes(args) => args.exec(),
     }
 }

@@ -1,29 +1,43 @@
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+struct RawTorrent {
+    id: String,
+    name: String,
+    path: PathBuf,
+    tracker_urls: Vec<String>,
+    size: usize,
+    files: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawFile {
+    id: String,
+    torrent_id: String,
+    path: PathBuf,
+    size: usize,
+}
+
+#[derive(Debug)]
+pub struct File {
+    pub path: PathBuf,
+    pub size: usize,
+}
+
+#[derive(Debug)]
 pub struct Torrent {
     pub id: String,
     pub name: String,
-    pub path: PathBuf,
     pub tracker_urls: Vec<String>,
     pub size: usize,
-    pub files: usize,
+    pub files: Vec<File>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct File {
-    pub id: String,
-    pub torrent_id: String,
-    pub path: PathBuf,
-    pub size: usize,
-}
-
-pub fn get_torrents() -> Result<Vec<Torrent>> {
+fn get_raw_torrents() -> Result<Vec<RawTorrent>> {
     let output = Command::new("sycli")
         .args(["list", "-k", "torrent", "-o", "json"])
         .output()?;
@@ -38,7 +52,7 @@ pub fn get_torrents() -> Result<Vec<Torrent>> {
     Ok(serde_json::from_str(&String::from_utf8(output.stdout)?)?)
 }
 
-pub fn get_files() -> Result<Vec<File>> {
+fn get_raw_files() -> Result<Vec<RawFile>> {
     let output = Command::new("sycli")
         .args(["list", "-k", "file", "-o", "json"])
         .output()?;
@@ -51,6 +65,68 @@ pub fn get_files() -> Result<Vec<File>> {
     }
 
     Ok(serde_json::from_str(&String::from_utf8(output.stdout)?)?)
+}
+
+pub fn get_torrents() -> Result<Vec<Torrent>> {
+    let raw_torrents = get_raw_torrents()?;
+    let raw_files = get_raw_files()?;
+
+    let mut torrents = raw_torrents
+        .into_iter()
+        .map(|t| {
+            (
+                t.id.clone(),
+                (
+                    Torrent {
+                        id: t.id,
+                        name: t.name,
+                        tracker_urls: t.tracker_urls,
+                        size: t.size,
+                        files: vec![],
+                    },
+                    t.path,
+                    t.files,
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    // TODO: Consider implementing detection of single-file torrents here by checking if the
+    // torrent name and the file path are equal.
+    // path
+    for f in raw_files {
+        let (torrent, path, _files_count) = torrents
+            .get_mut(&f.torrent_id)
+            .ok_or_else(|| anyhow!("{:?} has no matching torrent", f))?;
+        torrent.files.push(File {
+            path: path.join(f.path),
+            size: f.size,
+        });
+    }
+
+    torrents
+        .into_iter()
+        .map(|(_, (torrent, _path, files_count))| {
+            if torrent.files.len() != files_count {
+                bail!(
+                    "torrent {:?}: got {} files but expected {}",
+                    torrent,
+                    torrent.files.len(),
+                    files_count
+                );
+            }
+            let file_sizes: usize = torrent.files.iter().map(|f| f.size).sum();
+            if file_sizes != torrent.size {
+                bail!(
+                    "torrent {:?}: files total {} bytes but expected {}",
+                    torrent,
+                    file_sizes,
+                    torrent.size
+                );
+            }
+            Ok(torrent)
+        })
+        .collect()
 }
 
 pub fn move_torrent(torrent_id: &str, dir_path: &Path) -> Result<()> {
@@ -94,7 +170,7 @@ mod tests {
             "unknown_field": "is_ignored"
           }
         "#;
-        let t: Torrent = serde_json::from_str(json).unwrap();
+        let t: RawTorrent = serde_json::from_str(json).unwrap();
         assert_eq!(t.id, "1234567890123456789012345678901234567890");
         assert_eq!(t.name, "data.txt",);
         assert_eq!(t.path, Path::new("/tmp"));
@@ -115,7 +191,7 @@ mod tests {
             "unknown_field": "is_ignored"
           }
         "#;
-        let f: File = serde_json::from_str(json).unwrap();
+        let f: RawFile = serde_json::from_str(json).unwrap();
         assert_eq!(f.id, "0123456789012345678901234567890123456789");
         assert_eq!(f.torrent_id, "1234567890123456789012345678901234567890");
         assert_eq!(f.path, Path::new("data.txt"));

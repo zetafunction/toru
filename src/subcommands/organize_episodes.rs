@@ -26,49 +26,22 @@ impl OrganizeEpisodesArgs {
         let to_process = self.files.into_iter().collect::<HashSet<_>>();
 
         let torrents = sycli::get_torrents()?;
-        let files = sycli::get_files()?;
-
-        eprintln!("got {} torrents and {} files", torrents.len(), files.len());
-
-        // TODO: torrent.id is redundant, but meh?
-        let torrents = torrents
-            .into_iter()
-            .map(|torrent| (torrent.id.clone(), torrent))
-            .collect::<HashMap<_, _>>();
 
         // TODO: Punting on the harder problem here: instead, only bother processing torrents with a
         // single-associated file. Otherwise, this would have to do something a bit more clever to
         // coalesce entries.
-        let files = files
+        let files = torrents
             .into_iter()
-            .filter_map(|file| if let Some(torrent) = torrents.get(&file.torrent_id) {
-                if torrent.files != 1 {
-                    None
-                } else if torrent.size != file.size {
-                    eprintln!(
-                        "warning: file {} associated with torrent {} but size ({} vs {}) does not match; skipping",
-                        file.path.display(), torrent.id, file.size, torrent.size,
-                    );
-                    None
+            .filter_map(|torrent| {
+                if torrent.files.len() != 1 {
+                    return None;
+                };
+                let file = torrent.files.into_iter().next().unwrap();
+                if to_process.contains(&file.path) {
+                    Some((torrent.id, file))
                 } else {
-                    let path = torrent.path.join(file.path);
-                    if to_process.contains(&path) {
-                        Some((
-                                file.torrent_id.clone(),
-                                sycli::File {
-                                    id: file.id,
-                                    torrent_id: file.torrent_id,
-                                    path,
-                                    size: file.size,
-                                },
-                        ))
-                    } else {
-                        None
-                    }
+                    None
                 }
-            } else  {
-                eprintln!("warning: file {} has no matching torrent; skipping", file.path.display());
-                None
             })
             .collect::<HashMap<_, _>>();
         let re =

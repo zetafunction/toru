@@ -28,7 +28,7 @@ impl OrganizeEpisodesArgs {
         let torrents = sycli::get_torrents()?;
 
         // TODO: Punting on the harder problem here: instead, only bother processing torrents with a
-        // single-associated file. Otherwise, this would have to do something a bit more clever to
+        // single associated file. Otherwise, this would have to do something a bit more clever to
         // coalesce entries.
         let files = torrents
             .into_iter()
@@ -36,9 +36,10 @@ impl OrganizeEpisodesArgs {
                 if torrent.files.len() != 1 {
                     return None;
                 };
-                let file = torrent.files.into_iter().next().unwrap();
-                if to_process.contains(&file.path) {
-                    Some((torrent.id, file))
+                let (path, size) = torrent.files.into_iter().next().unwrap();
+                let path = torrent.base_path.join(&path);
+                if to_process.contains(&path) {
+                    Some((torrent.id, (path, size)))
                 } else {
                     None
                 }
@@ -47,16 +48,16 @@ impl OrganizeEpisodesArgs {
         let re =
         Regex::new(r"^(?<header>.+?\.S[0-9][0-9])E[0-9][0-9]\..+?\.(?<trailer>(?:720|1080|2160)p\..+?\.WEB-DL.+)\.mkv").unwrap();
 
-        for (torrent_id, file) in files {
+        for (torrent_id, (path, _size)) in files {
             eprintln!(
                 "processing file {} for torrent {}...",
-                file.path.display(),
+                path.display(),
                 torrent_id
             );
-            let Some(file_name) = file.path.file_name().and_then(OsStr::to_str) else {
+            let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
                 eprintln!(
-                    "  warning: missing or invalid filename for {:?}; skipping",
-                    file
+                    "  warning: missing or invalid filename for {}; skipping",
+                    path.display()
                 );
                 continue;
             };
@@ -90,10 +91,10 @@ impl OrganizeEpisodesArgs {
             eprintln!(
                 "  creating link from {} to original {}",
                 dir_path.join(file_name).display(),
-                file.path.display(),
+                path.display(),
             );
             if !self.dry_run {
-                std::fs::hard_link(&file.path, dir_path.join(file_name))?;
+                std::fs::hard_link(&path, dir_path.join(file_name))?;
             }
             eprintln!(
                 "  updating torrent {} directory to {}",
@@ -103,9 +104,9 @@ impl OrganizeEpisodesArgs {
             if !self.dry_run {
                 sycli::move_torrent(&torrent_id, &dir_path)?;
             }
-            eprintln!("  unlinking original path {}", file.path.display());
+            eprintln!("  unlinking original path {}", path.display());
             if !self.dry_run {
-                std::fs::remove_file(&file.path)?;
+                std::fs::remove_file(&path)?;
             }
         }
         Ok(())

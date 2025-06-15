@@ -86,10 +86,15 @@ fn collect_files(path: &Path) -> Result<HashMap<PathBuf, std::fs::Metadata>, Col
     for entry in walkdir::WalkDir::new(path) {
         let entry = entry?;
 
+        if entry.file_type().is_dir() {
+            // Do not include directories in the result, as torrents only contain files.
+            continue;
+        }
+
         // Give up if anything other than a file or directory is encountered. Directories are
         // normal and expected (though completely ignored by the torrent format), while
         // anything else is unexpected and probably needs the user to decide what to do.
-        if !entry.file_type().is_file() && !entry.file_type().is_dir() {
+        if !entry.file_type().is_file() {
             return Err(Error::NonFilePath(
                 path.to_path_buf(),
                 entry.path().to_path_buf(),
@@ -308,6 +313,17 @@ mod tests {
         std::fs::write(&test_file, "").expect("failed to create test file");
 
         assert!(collect_files(&test_file).is_ok_and(|files| { files.contains_key(&test_file) }));
+    }
+
+    #[test]
+    fn collect_files_with_dir() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let test_file = tmp_dir.path().join("test_file");
+        std::fs::write(&test_file, "").expect("failed to create test file");
+
+        let files = collect_files(tmp_dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files.contains_key(&test_file));
     }
 
     #[test]

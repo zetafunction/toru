@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,20 @@ pub struct MoveArgs {
 
     /// Destination directory.
     target: PathBuf,
+
+    /// How to move the files.
+    #[arg(default_value = "copy-and-unlink", long, value_enum)]
+    strategy: Strategy,
+}
+
+#[derive(Copy, Clone, Default, ValueEnum)]
+enum Strategy {
+    /// Copy-based approach; works across devices at the cost of requiring double the space
+    /// temporarily.
+    #[default]
+    CopyAndUnlink,
+    /// Rename-based approach; does not work across devices.
+    Rename,
 }
 
 impl MoveArgs {
@@ -32,40 +46,46 @@ impl MoveArgs {
         // TODO: Abstract this out so multiple torrent client backends can be used.
         let torrents = filter_torrents(sycli::get_torrents()?, &source_files)?;
 
-        for torrent in &torrents {
-            eprintln!("pausing {}", torrent.id);
-            sycli::pause_torrent(&torrent.id)?;
+        let pause_torrents = || -> anyhow::Result<()> {
+            for torrent in &torrents {
+                eprintln!("pausing {}", torrent.id);
+                sycli::pause_torrent(&torrent.id)?;
+            }
+            Ok(())
+        };
+
+        let move_torrents = || -> anyhow::Result<()> {
+            let source_is_file = source.is_file();
+            for torrent in &torrents {
+                let new_path = calculate_new_base_path(&source, source_is_file, &target, torrent)?;
+                eprintln!(
+                    "updating {} to directory {}",
+                    torrent.id,
+                    new_path.display()
+                );
+                sycli::move_torrent(&torrent.id, &new_path)?
+            }
+            Ok(())
+        };
+
+        let resume_torrents = || -> anyhow::Result<()> {
+            for torrent in &torrents {
+                eprintln!("resuming {}", torrent.id);
+                sycli::resume_torrent(&torrent.id)?;
+            }
+            Ok(())
+        };
+
+        match self.strategy {
+            Strategy::Rename => move_files_with_rename(
+                &source,
+                &target,
+                pause_torrents,
+                move_torrents,
+                resume_torrents,
+            ),
+            Strategy::CopyAndUnlink => move_files_with_copy(&source, &target, move_torrents),
         }
-
-        move_files(
-            &source,
-            &target,
-            || -> anyhow::Result<()> {
-                let source_is_file = source.is_file();
-                for torrent in &torrents {
-                    let new_path =
-                        calculate_new_base_path(&source, source_is_file, &target, torrent)?;
-                    eprintln!(
-                        "updating {} to directory {}",
-                        torrent.id,
-                        new_path.display()
-                    );
-                    sycli::move_torrent(&torrent.id, &new_path)?
-                }
-                Ok(())
-            },
-            || -> anyhow::Result<()> {
-                for torrent in &torrents {
-                    eprintln!("resuming {}", torrent.id);
-                    sycli::resume_torrent(&torrent.id)?;
-                }
-                Ok(())
-            },
-        )?;
-
-        // TODO: Make this work with the cross-seed subcommand (to be added), which uses symlinks.
-
-        Ok(())
     }
 }
 
@@ -165,15 +185,17 @@ fn filter_torrents(
 }
 
 // TODO: Add some tests, especially for the cross-device case.
-fn move_files<F, G>(
+fn move_files_with_rename<P, M, R>(
     source: &Path,
     target: &Path,
-    move_torrents: F,
-    resume_torrents: G,
+    pause_torrents: P,
+    move_torrents: M,
+    resume_torrents: R,
 ) -> anyhow::Result<()>
 where
-    F: FnOnce() -> anyhow::Result<()>,
-    G: FnOnce() -> anyhow::Result<()>,
+    P: FnOnce() -> anyhow::Result<()>,
+    M: FnOnce() -> anyhow::Result<()>,
+    R: FnOnce() -> anyhow::Result<()>,
 {
     let target_with_file_name = target.join(source.file_name().ok_or_else(|| {
         anyhow!(
@@ -183,66 +205,77 @@ where
     })?);
 
     eprintln!(
-        "moving {} to {}",
+        "moving {} to {} using rename",
         source.display(),
         target_with_file_name.display()
     );
-    match std::fs::rename(source, &target_with_file_name) {
-        Ok(()) => {
-            move_torrents()?;
-            resume_torrents()?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
-            // If `source` is a prefix of `target`, cleaning up the original source files will lead
-            // to data loss!
-            assert!(!target.starts_with(&source));
 
-            eprintln!("rename failed; falling back to manual file copy");
-            // In this case, it's fine to resume the torrents pre-emptively since the files will be
-            // copied to `target`.
-            resume_torrents()?;
+    pause_torrents()?;
+    std::fs::rename(source, &target_with_file_name)?;
+    move_torrents()?;
+    resume_torrents()
+}
 
-            let progress = ProgressBar::no_length()
-                .with_style(
-                    ProgressStyle::with_template(
-                        "[{elapsed_precise}] [{bar:30.cyan/blue}] {bytes}/{total_bytes} {msg}",
-                    )
-                    .unwrap()
-                    .progress_chars("=> "),
-                )
-                .with_finish(ProgressFinish::AndLeave);
-            if source.is_dir() {
-                fs_extra::dir::copy_with_progress(
-                    source,
-                    target,
-                    &fs_extra::dir::CopyOptions::new(),
-                    |process| {
-                        progress.set_message(process.file_name);
-                        progress.set_length(process.total_bytes);
-                        progress.set_position(process.copied_bytes);
-                        fs_extra::dir::TransitProcessResult::ContinueOrAbort
-                    },
-                )?;
-                progress.finish_and_clear();
-                move_torrents()?;
-                std::fs::remove_dir_all(source)?;
-            } else {
-                fs_extra::file::copy_with_progress(
-                    source,
-                    target_with_file_name,
-                    &fs_extra::file::CopyOptions::new(),
-                    |process| {
-                        progress.set_length(process.total_bytes);
-                        progress.set_position(process.copied_bytes);
-                    },
-                )?;
-                progress.finish_and_clear();
-                move_torrents()?;
-                std::fs::remove_file(source)?;
-            }
-        }
-        e => e?,
-    };
+fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
+    source: &Path,
+    target: &Path,
+    move_torrents: M,
+) -> anyhow::Result<()> {
+    let target_with_file_name = target.join(source.file_name().ok_or_else(|| {
+        anyhow!(
+            "could not extract file name component from {}",
+            source.display()
+        )
+    })?);
+
+    eprintln!(
+        "moving {} to {} using copy",
+        source.display(),
+        target_with_file_name.display()
+    );
+
+    // If `source` is a prefix of `target`, cleaning up the original source files will lead
+    // to data loss!
+    assert!(!target.starts_with(&source));
+
+    let progress = ProgressBar::no_length()
+        .with_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] [{bar:30.cyan/blue}] {bytes}/{total_bytes} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        )
+        .with_finish(ProgressFinish::AndLeave);
+    if source.is_dir() {
+        fs_extra::dir::copy_with_progress(
+            source,
+            target,
+            &fs_extra::dir::CopyOptions::new(),
+            |process| {
+                progress.set_message(process.file_name);
+                progress.set_length(process.total_bytes);
+                progress.set_position(process.copied_bytes);
+                fs_extra::dir::TransitProcessResult::ContinueOrAbort
+            },
+        )?;
+        progress.finish_and_clear();
+        move_torrents()?;
+        std::fs::remove_dir_all(source)?;
+    } else {
+        fs_extra::file::copy_with_progress(
+            source,
+            target_with_file_name,
+            &fs_extra::file::CopyOptions::new(),
+            |process| {
+                progress.set_length(process.total_bytes);
+                progress.set_position(process.copied_bytes);
+            },
+        )?;
+        progress.finish_and_clear();
+        move_torrents()?;
+        std::fs::remove_file(source)?;
+    }
 
     Ok(())
 }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::sycli;
 
 #[derive(Args)]
-pub struct OrganizeEpisodesArgs {
+pub struct BatchEpisodesArgs {
     /// Base directory to work from.
     #[arg(long)]
     base_dir: PathBuf,
@@ -21,7 +21,7 @@ pub struct OrganizeEpisodesArgs {
     files: Vec<PathBuf>,
 }
 
-impl OrganizeEpisodesArgs {
+impl BatchEpisodesArgs {
     pub fn exec(self) -> anyhow::Result<()> {
         let to_process = self.files.into_iter().collect::<HashSet<_>>();
 

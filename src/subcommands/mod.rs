@@ -1,5 +1,5 @@
+mod batch_episodes;
 mod r#move;
-mod organize_episodes;
 
+pub use batch_episodes::BatchEpisodesArgs;
 pub use r#move::MoveArgs;
-pub use organize_episodes::OrganizeEpisodesArgs;

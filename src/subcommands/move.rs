@@ -245,7 +245,7 @@ fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
 
     // If `source` is a prefix of `target`, cleaning up the original source files will lead
     // to data loss!
-    assert!(!target.starts_with(&source));
+    assert!(!target.starts_with(source));
 
     let progress = ProgressBar::no_length()
         .with_style(

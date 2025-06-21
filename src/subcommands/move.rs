@@ -97,6 +97,8 @@ enum CollectFilesError {
     NonFilePath(PathBuf, PathBuf),
     #[error("duplicate entry for {0}")]
     DuplicateEntry(PathBuf),
+    #[error("no files")]
+    NoFiles,
 }
 
 fn collect_files(path: &Path) -> Result<HashMap<PathBuf, std::fs::Metadata>, CollectFilesError> {
@@ -127,8 +129,11 @@ fn collect_files(path: &Path) -> Result<HashMap<PathBuf, std::fs::Metadata>, Col
             return Err(Error::DuplicateEntry(entry.path().to_path_buf()));
         }
     }
-    // TODO: Maybe comment on empty directories?
-    Ok(files)
+    if files.is_empty() {
+        Err(Error::NoFiles)
+    } else {
+        Ok(files)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -338,6 +343,15 @@ fn calculate_new_base_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_files_empty_dir() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            collect_files(&tmp_dir.path()),
+            Err(CollectFilesError::NoFiles)
+        ));
+    }
 
     #[test]
     fn collect_files_with_file() {

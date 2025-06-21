@@ -23,7 +23,7 @@ struct RawFile {
     size: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Torrent {
     // TODO: Consider representing this as the bytes of the infohash instead.
     pub id: String,

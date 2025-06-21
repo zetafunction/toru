@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail};
 use clap::{Args, ValueEnum};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -101,7 +101,12 @@ enum CollectFilesError {
     NoFiles,
 }
 
-fn collect_files(path: &Path) -> Result<HashMap<PathBuf, std::fs::Metadata>, CollectFilesError> {
+/// Walks `path` and returns a `HashMap` of file paths to file sizes in that directory tree. Any
+/// subdirectories are not included in the returned map.
+///
+/// If `path` is a file, returns a map with a single entry of `path` and its size.
+/// If `path` contains any non-directory and non-file entries, returns an error.
+fn collect_files(path: &Path) -> Result<HashMap<PathBuf, u64>, CollectFilesError> {
     type Error = CollectFilesError;
 
     let mut files = HashMap::new();
@@ -123,9 +128,7 @@ fn collect_files(path: &Path) -> Result<HashMap<PathBuf, std::fs::Metadata>, Col
             ));
         }
 
-        let metadata = entry.metadata()?;
-
-        if let Some(_old_value) = files.insert(entry.path().into(), metadata) {
+        if let Some(_old_value) = files.insert(entry.path().into(), entry.metadata()?.len()) {
             return Err(Error::DuplicateEntry(entry.path().to_path_buf()));
         }
     }
@@ -136,30 +139,38 @@ fn collect_files(path: &Path) -> Result<HashMap<PathBuf, std::fs::Metadata>, Col
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 enum FilterTorrentsError {
     #[error("{0:?} includes source and non-source files")]
     TorrentIncludesSourceAndNonSourceFiles(sycli::Torrent),
     #[error("no torrents matched source files")]
-    NoMatchingTorrents(),
+    NoMatchingTorrents,
     #[error("no torrent matched all source files: matched {matched} out of {total} source files")]
     DidNotMatchAllSourceFiles { matched: usize, total: usize },
 }
 
+/// Filters `torrents` and return a `Vec` with all torrents that contain files in `source_files`.
+///
+/// Returns an error if:
+/// - a torrent contains some files in `source_files` and some files not in `source_files`.
+/// - or if not all `source_files` were matched by `torrents`.
 fn filter_torrents(
     torrents: Vec<sycli::Torrent>,
-    source_files: &HashMap<PathBuf, std::fs::Metadata>,
+    source_files: &HashMap<PathBuf, u64>,
 ) -> Result<Vec<sycli::Torrent>, FilterTorrentsError> {
     type Error = FilterTorrentsError;
 
     let mut filtered_torrents = vec![];
+    let mut included_paths = HashSet::new();
     for torrent in torrents {
         let (included, not_included) =
             torrent
                 .files
                 .iter()
                 .fold((0, 0), |(included, missing), (path, _size)| {
-                    if source_files.contains_key(&torrent.base_path.join(path)) {
+                    let path = torrent.base_path.join(path);
+                    if source_files.contains_key(&path) {
+                        included_paths.insert(path);
                         (included + 1, missing)
                     } else {
                         (included, missing + 1)
@@ -175,17 +186,10 @@ fn filter_torrents(
         filtered_torrents.push(torrent);
     }
 
-    match filtered_torrents
-        .iter()
-        .map(|torrent| torrent.files.len())
-        .max()
-    {
-        None => Err(Error::NoMatchingTorrents()),
-        Some(len) if len == source_files.len() => Ok(filtered_torrents),
-        Some(len) => Err(Error::DidNotMatchAllSourceFiles {
-            matched: len,
-            total: source_files.len(),
-        }),
+    match (included_paths.len(), source_files.len()) {
+        (0, _) => Err(Error::NoMatchingTorrents),
+        (matched, total) if matched == total => Ok(filtered_torrents),
+        (matched, total) => Err(Error::DidNotMatchAllSourceFiles { matched, total }),
     }
 }
 
@@ -385,6 +389,103 @@ mod tests {
             collect_files(tmp_dir.path()),
             Err(CollectFilesError::NonFilePath(_, _))
         ));
+    }
+
+    #[test]
+    fn filter_torrents_with_no_source_files() {
+        let torrent = sycli::Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        assert_eq!(
+            filter_torrents(vec![torrent], &HashMap::new()),
+            Err(FilterTorrentsError::NoMatchingTorrents)
+        );
+    }
+
+    #[test]
+    fn filter_torrents_with_no_torrents() {
+        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
+        assert_eq!(
+            filter_torrents(vec![], &source_files),
+            Err(FilterTorrentsError::NoMatchingTorrents)
+        );
+    }
+
+    #[test]
+    fn filter_torrents_normal() {
+        let torrent = sycli::Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        let torrent2 = sycli::Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test2.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test2.txt".into(), 123)]),
+        };
+        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
+        assert_eq!(
+            filter_torrents(vec![torrent.clone(), torrent2], &source_files),
+            Ok(vec![torrent])
+        );
+    }
+
+    #[test]
+    fn filter_torrents_torrent_with_included_and_non_included_files() {
+        let torrent = sycli::Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123), ("test2.txt".into(), 123)]),
+        };
+        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
+        assert_eq!(
+            filter_torrents(vec![torrent.clone()], &source_files),
+            Err(FilterTorrentsError::TorrentIncludesSourceAndNonSourceFiles(
+                torrent
+            ))
+        );
+    }
+
+    #[test]
+    fn filter_torrent_not_all_source_files_matched() {
+        let torrent = sycli::Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        let source_files = HashMap::from([
+            ("/tmp/test.txt".into(), 123),
+            ("/tmp/test2.txt".into(), 123),
+        ]);
+        assert_eq!(
+            filter_torrents(vec![torrent], &source_files),
+            Err(FilterTorrentsError::DidNotMatchAllSourceFiles {
+                matched: 1,
+                total: 2
+            }),
+        );
     }
 
     #[test]

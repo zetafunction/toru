@@ -35,7 +35,7 @@ impl BatchEpisodesArgs {
             .filter_map(|torrent| {
                 if torrent.files.len() != 1 {
                     return None;
-                };
+                }
                 let (path, size) = torrent.files.into_iter().next().unwrap();
                 let path = torrent.base_path.join(&path);
                 if to_process.contains(&path) {
@@ -63,10 +63,7 @@ impl BatchEpisodesArgs {
             };
 
             let Some(captures) = re.captures(file_name) else {
-                eprintln!(
-                    "  warning: unable to extract metadata from {}; skipping",
-                    file_name
-                );
+                eprintln!("  warning: unable to extract metadata from {file_name}; skipping",);
                 continue;
             };
 

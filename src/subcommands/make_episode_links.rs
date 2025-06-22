@@ -32,7 +32,7 @@ impl OMDbResult {
         // all.
         format!(
             "{}.S{season:02}E{episode:02}.{extension}",
-            self.title.replace(" ", ".")
+            self.title.replace(' ', ".")
         )
     }
 }

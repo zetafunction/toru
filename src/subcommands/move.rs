@@ -63,7 +63,7 @@ impl MoveArgs {
                     torrent.id,
                     new_path.display()
                 );
-                sycli::move_torrent(&torrent.id, &new_path)?
+                sycli::move_torrent(&torrent.id, &new_path)?;
             }
             Ok(())
         };
@@ -306,10 +306,10 @@ fn calculate_new_base_path(
     target: &Path,
     torrent: &sycli::Torrent,
 ) -> Result<PathBuf, CalculateNewBasePathError> {
+    type Error = CalculateNewBasePathError;
+
     #[cfg(not(test))]
     assert!(target.is_dir());
-
-    type Error = CalculateNewBasePathError;
 
     if source_is_file {
         return Ok(target.to_path_buf());

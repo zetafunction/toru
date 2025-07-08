@@ -37,6 +37,7 @@ impl MoveArgs {
         }
 
         let source = std::path::absolute(self.source)?;
+        let source_is_file = source.is_file();
         let target = std::path::absolute(self.target)?;
 
         // TODO: Make the paths absolute here?
@@ -55,7 +56,6 @@ impl MoveArgs {
         };
 
         let move_torrents = || -> anyhow::Result<()> {
-            let source_is_file = source.is_file();
             for torrent in &torrents {
                 let new_path = calculate_new_base_path(&source, source_is_file, &target, torrent)?;
                 eprintln!(

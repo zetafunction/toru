@@ -18,6 +18,8 @@ enum Commands {
     BatchEpisodes(subcommands::BatchEpisodesArgs),
     /// Creates symlinks for a TV scanner to recognize files as episodes.
     MakeEpisodeLinks(subcommands::MakeEpisodeLinksArgs),
+    /// Update paths after files or directories are externally moved.
+    UpdatePaths(subcommands::UpdatePathsArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -27,5 +29,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Move(args) => args.exec(),
         Commands::BatchEpisodes(args) => args.exec(),
         Commands::MakeEpisodeLinks(args) => args.exec(),
+        Commands::UpdatePaths(args) => args.exec(),
     }
 }

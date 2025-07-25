@@ -25,7 +25,7 @@ impl UpdatePathsArgs {
         // subcommand, since it could be used to help pick up the pieces if move fails in the
         // middle for whatever reason.
         for torrent in sycli::get_torrents()? {
-            if let Some(remainder) = torrent.base_path.strip_prefix(&source).ok() {
+            if let Ok(remainder) = torrent.base_path.strip_prefix(&source) {
                 let new_base_path = target.join(remainder);
                 eprintln!(
                     "Updating {} from {} to {}",
@@ -40,7 +40,7 @@ impl UpdatePathsArgs {
         for symlink_dir in self.symlink_dir {
             for symlink in collect_symlinks(&symlink_dir)? {
                 let original_target_path = std::fs::read_link(&symlink)?;
-                if let Some(remainder) = original_target_path.strip_prefix(&source).ok() {
+                if let Ok(remainder) = original_target_path.strip_prefix(&source) {
                     let new_target_path = target.join(remainder);
                     eprintln!(
                         "Updating symlink {} from {} to {}",
@@ -78,7 +78,7 @@ fn collect_symlinks(path: &Path) -> Result<Vec<PathBuf>, walkdir::Error> {
 fn create_or_update_symlink(link: &Path, target: &Path) -> std::io::Result<()> {
     match std::os::unix::fs::symlink(target, link) {
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            std::fs::remove_file(&link)?;
+            std::fs::remove_file(link)?;
             std::os::unix::fs::symlink(target, link)
         }
         result => result,

@@ -128,6 +128,7 @@ fn collect_files(path: &Path) -> Result<HashMap<PathBuf, u64>, CollectFilesError
             ));
         }
 
+        // TODO: Perhaps this should just panic?
         if let Some(_old_value) = files.insert(entry.path().into(), entry.metadata()?.len()) {
             return Err(Error::DuplicateEntry(entry.path().to_path_buf()));
         }

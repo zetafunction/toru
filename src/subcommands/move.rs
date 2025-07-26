@@ -251,7 +251,7 @@ fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
     let progress = ProgressBar::no_length()
         .with_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] [{bar:30.cyan/blue}] {bytes}/{total_bytes} {msg}",
+                "{bytes} {elapsed_precise} [ {bytes_per_sec} ] [{wide_bar:.cyan/blue}] {percent}% ETA {eta_precise}",
             )
             .unwrap()
             .progress_chars("=> "),
@@ -269,7 +269,7 @@ fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
                 fs_extra::dir::TransitProcessResult::ContinueOrAbort
             },
         )?;
-        progress.finish_and_clear();
+        progress.finish();
         move_torrents()?;
         std::fs::remove_dir_all(source)?;
     } else {
@@ -282,7 +282,7 @@ fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
                 progress.set_position(process.copied_bytes);
             },
         )?;
-        progress.finish_and_clear();
+        progress.finish();
         move_torrents()?;
         std::fs::remove_file(source)?;
     }

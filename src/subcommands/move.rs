@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::fs;
 use crate::sycli;
 
 #[derive(Args)]
@@ -40,12 +41,10 @@ impl MoveArgs {
         let source_is_file = source.is_file();
         let target = std::path::absolute(self.target)?;
 
-        // TODO: Make the paths absolute here?
-
-        let source_files = collect_files(&source)?;
+        let source_files = fs::collect_files(&source)?;
 
         // TODO: Abstract this out so multiple torrent client backends can be used.
-        let torrents = filter_torrents(sycli::get_torrents()?, &source_files)?;
+        let torrents = sycli::filter_torrents(sycli::get_torrents()?, &source_files)?;
 
         let pause_torrents = || -> anyhow::Result<()> {
             for torrent in &torrents {
@@ -86,111 +85,6 @@ impl MoveArgs {
             ),
             Strategy::CopyAndUnlink => move_files_with_copy(&source, &target, move_torrents),
         }
-    }
-}
-
-#[derive(Debug, Error)]
-enum CollectFilesError {
-    #[error("WalkDir failed: {0:?}")]
-    WalkDir(#[from] walkdir::Error),
-    #[error("non-file path {1} encountered in {0}")]
-    NonFilePath(PathBuf, PathBuf),
-    #[error("duplicate entry for {0}")]
-    DuplicateEntry(PathBuf),
-    #[error("no files")]
-    NoFiles,
-}
-
-/// Walks `path` and returns a `HashMap` of file paths to file sizes in that directory tree. Any
-/// subdirectories are not included in the returned map.
-///
-/// If `path` is a file, returns a map with a single entry of `path` and its size.
-/// If `path` contains any non-directory and non-file entries, returns an error.
-fn collect_files(path: &Path) -> Result<HashMap<PathBuf, u64>, CollectFilesError> {
-    type Error = CollectFilesError;
-
-    let mut files = HashMap::new();
-    for entry in walkdir::WalkDir::new(path) {
-        let entry = entry?;
-
-        if entry.file_type().is_dir() {
-            // Do not include directories in the result, as torrents only contain files.
-            continue;
-        }
-
-        // Give up if anything other than a file or directory is encountered. Directories are
-        // normal and expected (though completely ignored by the torrent format), while
-        // anything else is unexpected and probably needs the user to decide what to do.
-        if !entry.file_type().is_file() {
-            return Err(Error::NonFilePath(
-                path.to_path_buf(),
-                entry.path().to_path_buf(),
-            ));
-        }
-
-        // TODO: Perhaps this should just panic?
-        if let Some(_old_value) = files.insert(entry.path().into(), entry.metadata()?.len()) {
-            return Err(Error::DuplicateEntry(entry.path().to_path_buf()));
-        }
-    }
-    if files.is_empty() {
-        Err(Error::NoFiles)
-    } else {
-        Ok(files)
-    }
-}
-
-#[derive(Debug, Error, PartialEq)]
-enum FilterTorrentsError {
-    #[error("{0:?} includes source and non-source files")]
-    TorrentIncludesSourceAndNonSourceFiles(sycli::Torrent),
-    #[error("no torrents matched source files")]
-    NoMatchingTorrents,
-    #[error("no torrent matched all source files: matched {matched} out of {total} source files")]
-    DidNotMatchAllSourceFiles { matched: usize, total: usize },
-}
-
-/// Filters `torrents` and return a `Vec` with all torrents that contain files in `source_files`.
-///
-/// Returns an error if:
-/// - a torrent contains some files in `source_files` and some files not in `source_files`.
-/// - or if not all `source_files` were matched by `torrents`.
-fn filter_torrents(
-    torrents: Vec<sycli::Torrent>,
-    source_files: &HashMap<PathBuf, u64>,
-) -> Result<Vec<sycli::Torrent>, FilterTorrentsError> {
-    type Error = FilterTorrentsError;
-
-    let mut filtered_torrents = vec![];
-    let mut included_paths = HashSet::new();
-    for torrent in torrents {
-        let (included, not_included) =
-            torrent
-                .files
-                .iter()
-                .fold((0, 0), |(included, missing), (path, _size)| {
-                    let path = torrent.base_path.join(path);
-                    if source_files.contains_key(&path) {
-                        included_paths.insert(path);
-                        (included + 1, missing)
-                    } else {
-                        (included, missing + 1)
-                    }
-                });
-        if not_included == torrent.files.len() {
-            // Torrent has no files specified in source files, so it is not interesting.
-            continue;
-        }
-        if included > 0 && not_included > 0 {
-            return Err(Error::TorrentIncludesSourceAndNonSourceFiles(torrent));
-        }
-        filtered_torrents.push(torrent);
-    }
-
-    match (included_paths.len(), source_files.len()) {
-        (0, _) => Err(Error::NoMatchingTorrents),
-        (matched, total) if matched == total => Ok(filtered_torrents),
-        (matched, total) => Err(Error::DidNotMatchAllSourceFiles { matched, total }),
     }
 }
 
@@ -348,146 +242,6 @@ fn calculate_new_base_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn collect_files_empty_dir() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            collect_files(&tmp_dir.path()),
-            Err(CollectFilesError::NoFiles)
-        ));
-    }
-
-    #[test]
-    fn collect_files_with_file() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let test_file = tmp_dir.path().join("test_file");
-        std::fs::write(&test_file, "").expect("failed to create test file");
-
-        assert!(collect_files(&test_file).is_ok_and(|files| { files.contains_key(&test_file) }));
-    }
-
-    #[test]
-    fn collect_files_with_dir() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let test_file = tmp_dir.path().join("test_file");
-        std::fs::write(&test_file, "").expect("failed to create test file");
-
-        let files = collect_files(tmp_dir.path()).unwrap();
-        assert_eq!(files.len(), 1);
-        assert!(files.contains_key(&test_file));
-    }
-
-    #[test]
-    fn collect_files_with_symlink_fails() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let test_file = tmp_dir.path().join("test_file");
-        std::fs::write(&test_file, "").expect("failed to create test file");
-        let test_symlink = tmp_dir.path().join("test_symlink");
-        std::os::unix::fs::symlink(test_file, test_symlink).expect("failed to create test symlink");
-
-        assert!(matches!(
-            collect_files(tmp_dir.path()),
-            Err(CollectFilesError::NonFilePath(_, _))
-        ));
-    }
-
-    #[test]
-    fn filter_torrents_with_no_source_files() {
-        let torrent = sycli::Torrent {
-            id: "0123456789012345678901234567890123456789".into(),
-            name: "test.txt".into(),
-            base_path: "/tmp".into(),
-            progress: 1.0,
-            tracker_urls: vec!["https://example.com:9999".into()],
-            size: 123,
-            files: HashMap::from([("test.txt".into(), 123)]),
-        };
-        assert_eq!(
-            filter_torrents(vec![torrent], &HashMap::new()),
-            Err(FilterTorrentsError::NoMatchingTorrents)
-        );
-    }
-
-    #[test]
-    fn filter_torrents_with_no_torrents() {
-        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
-        assert_eq!(
-            filter_torrents(vec![], &source_files),
-            Err(FilterTorrentsError::NoMatchingTorrents)
-        );
-    }
-
-    #[test]
-    fn filter_torrents_normal() {
-        let torrent = sycli::Torrent {
-            id: "0123456789012345678901234567890123456789".into(),
-            name: "test.txt".into(),
-            base_path: "/tmp".into(),
-            progress: 1.0,
-            tracker_urls: vec!["https://example.com:9999".into()],
-            size: 123,
-            files: HashMap::from([("test.txt".into(), 123)]),
-        };
-        let torrent2 = sycli::Torrent {
-            id: "0123456789012345678901234567890123456789".into(),
-            name: "test2.txt".into(),
-            base_path: "/tmp".into(),
-            progress: 1.0,
-            tracker_urls: vec!["https://example.com:9999".into()],
-            size: 123,
-            files: HashMap::from([("test2.txt".into(), 123)]),
-        };
-        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
-        assert_eq!(
-            filter_torrents(vec![torrent.clone(), torrent2], &source_files),
-            Ok(vec![torrent])
-        );
-    }
-
-    #[test]
-    fn filter_torrents_torrent_with_included_and_non_included_files() {
-        let torrent = sycli::Torrent {
-            id: "0123456789012345678901234567890123456789".into(),
-            name: "test.txt".into(),
-            base_path: "/tmp".into(),
-            progress: 1.0,
-            tracker_urls: vec!["https://example.com:9999".into()],
-            size: 123,
-            files: HashMap::from([("test.txt".into(), 123), ("test2.txt".into(), 123)]),
-        };
-        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
-        assert_eq!(
-            filter_torrents(vec![torrent.clone()], &source_files),
-            Err(FilterTorrentsError::TorrentIncludesSourceAndNonSourceFiles(
-                torrent
-            ))
-        );
-    }
-
-    #[test]
-    fn filter_torrent_not_all_source_files_matched() {
-        let torrent = sycli::Torrent {
-            id: "0123456789012345678901234567890123456789".into(),
-            name: "test.txt".into(),
-            base_path: "/tmp".into(),
-            progress: 1.0,
-            tracker_urls: vec!["https://example.com:9999".into()],
-            size: 123,
-            files: HashMap::from([("test.txt".into(), 123)]),
-        };
-        let source_files = HashMap::from([
-            ("/tmp/test.txt".into(), 123),
-            ("/tmp/test2.txt".into(), 123),
-        ]);
-        assert_eq!(
-            filter_torrents(vec![torrent], &source_files),
-            Err(FilterTorrentsError::DidNotMatchAllSourceFiles {
-                matched: 1,
-                total: 2
-            }),
-        );
-    }
 
     #[test]
     fn calculate_new_base_path_with_single_file_torrent() {

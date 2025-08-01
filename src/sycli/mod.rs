@@ -1,8 +1,9 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use thiserror::Error;
 
 #[derive(Debug, Deserialize)]
 struct RawTorrent {
@@ -181,6 +182,62 @@ pub fn move_torrent(torrent_id: &str, dir_path: &Path) -> Result<()> {
     Ok(())
 }
 
+// TODO: This isn't really the right place for this helper, but since Torrent is also defined
+// here for now...
+#[derive(Debug, Error, PartialEq)]
+pub enum FilterTorrentsError {
+    #[error("{0:?} includes source and non-source files")]
+    TorrentIncludesSourceAndNonSourceFiles(Torrent),
+    #[error("no torrents matched source files")]
+    NoMatchingTorrents,
+    #[error("no torrent matched all source files: matched {matched} out of {total} source files")]
+    DidNotMatchAllSourceFiles { matched: usize, total: usize },
+}
+
+/// Filters `torrents` and return a `Vec` with all torrents that contain files in `source_files`.
+///
+/// Returns an error if:
+/// - a torrent contains some files in `source_files` and some files not in `source_files`.
+/// - or if not all `source_files` were matched by `torrents`.
+pub fn filter_torrents(
+    torrents: Vec<Torrent>,
+    source_files: &HashMap<PathBuf, u64>,
+) -> Result<Vec<Torrent>, FilterTorrentsError> {
+    type Error = FilterTorrentsError;
+
+    let mut filtered_torrents = vec![];
+    let mut included_paths = HashSet::new();
+    for torrent in torrents {
+        let (included, not_included) =
+            torrent
+                .files
+                .iter()
+                .fold((0, 0), |(included, missing), (path, _size)| {
+                    let path = torrent.base_path.join(path);
+                    if source_files.contains_key(&path) {
+                        included_paths.insert(path);
+                        (included + 1, missing)
+                    } else {
+                        (included, missing + 1)
+                    }
+                });
+        if not_included == torrent.files.len() {
+            // Torrent has no files specified in source files, so it is not interesting.
+            continue;
+        }
+        if included > 0 && not_included > 0 {
+            return Err(Error::TorrentIncludesSourceAndNonSourceFiles(torrent));
+        }
+        filtered_torrents.push(torrent);
+    }
+
+    match (included_paths.len(), source_files.len()) {
+        (0, _) => Err(Error::NoMatchingTorrents),
+        (matched, total) if matched == total => Ok(filtered_torrents),
+        (matched, total) => Err(Error::DidNotMatchAllSourceFiles { matched, total }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +286,102 @@ mod tests {
         assert_eq!(f.torrent_id, "1234567890123456789012345678901234567890");
         assert_eq!(f.path, Path::new("data.txt"));
         assert_eq!(f.size, 88888888);
+    }
+
+    #[test]
+    fn filter_torrents_with_no_source_files() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        assert_eq!(
+            filter_torrents(vec![torrent], &HashMap::new()),
+            Err(FilterTorrentsError::NoMatchingTorrents)
+        );
+    }
+
+    #[test]
+    fn filter_torrents_with_no_torrents() {
+        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
+        assert_eq!(
+            filter_torrents(vec![], &source_files),
+            Err(FilterTorrentsError::NoMatchingTorrents)
+        );
+    }
+
+    #[test]
+    fn filter_torrents_normal() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        let torrent2 = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test2.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test2.txt".into(), 123)]),
+        };
+        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
+        assert_eq!(
+            filter_torrents(vec![torrent.clone(), torrent2], &source_files),
+            Ok(vec![torrent])
+        );
+    }
+
+    #[test]
+    fn filter_torrents_torrent_with_included_and_non_included_files() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123), ("test2.txt".into(), 123)]),
+        };
+        let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
+        assert_eq!(
+            filter_torrents(vec![torrent.clone()], &source_files),
+            Err(FilterTorrentsError::TorrentIncludesSourceAndNonSourceFiles(
+                torrent
+            ))
+        );
+    }
+
+    #[test]
+    fn filter_torrent_not_all_source_files_matched() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        let source_files = HashMap::from([
+            ("/tmp/test.txt".into(), 123),
+            ("/tmp/test2.txt".into(), 123),
+        ]);
+        assert_eq!(
+            filter_torrents(vec![torrent], &source_files),
+            Err(FilterTorrentsError::DidNotMatchAllSourceFiles {
+                matched: 1,
+                total: 2
+            }),
+        );
     }
 }

@@ -200,7 +200,7 @@ pub enum FilterTorrentsError {
 /// - a torrent contains some files in `source_files` and some files not in `source_files`.
 /// - or if not all `source_files` were matched by `torrents`.
 pub fn filter_torrents(
-    torrents: Vec<Torrent>,
+    torrents: &[Torrent],
     source_files: &HashMap<PathBuf, u64>,
 ) -> Result<Vec<Torrent>, FilterTorrentsError> {
     type Error = FilterTorrentsError;
@@ -226,9 +226,11 @@ pub fn filter_torrents(
             continue;
         }
         if included > 0 && not_included > 0 {
-            return Err(Error::TorrentIncludesSourceAndNonSourceFiles(torrent));
+            return Err(Error::TorrentIncludesSourceAndNonSourceFiles(
+                torrent.clone(),
+            ));
         }
-        filtered_torrents.push(torrent);
+        filtered_torrents.push(torrent.clone());
     }
 
     match (included_paths.len(), source_files.len()) {
@@ -300,7 +302,7 @@ mod tests {
             files: HashMap::from([("test.txt".into(), 123)]),
         };
         assert_eq!(
-            filter_torrents(vec![torrent], &HashMap::new()),
+            filter_torrents(&[torrent], &HashMap::new()),
             Err(FilterTorrentsError::NoMatchingTorrents)
         );
     }
@@ -309,7 +311,7 @@ mod tests {
     fn filter_torrents_with_no_torrents() {
         let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
         assert_eq!(
-            filter_torrents(vec![], &source_files),
+            filter_torrents(&[], &source_files),
             Err(FilterTorrentsError::NoMatchingTorrents)
         );
     }
@@ -336,7 +338,7 @@ mod tests {
         };
         let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
         assert_eq!(
-            filter_torrents(vec![torrent.clone(), torrent2], &source_files),
+            filter_torrents(&[torrent.clone(), torrent2], &source_files),
             Ok(vec![torrent])
         );
     }
@@ -354,7 +356,7 @@ mod tests {
         };
         let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
         assert_eq!(
-            filter_torrents(vec![torrent.clone()], &source_files),
+            filter_torrents(&[torrent.clone()], &source_files),
             Err(FilterTorrentsError::TorrentIncludesSourceAndNonSourceFiles(
                 torrent
             ))
@@ -377,7 +379,7 @@ mod tests {
             ("/tmp/test2.txt".into(), 123),
         ]);
         assert_eq!(
-            filter_torrents(vec![torrent], &source_files),
+            filter_torrents(&[torrent], &source_files),
             Err(FilterTorrentsError::DidNotMatchAllSourceFiles {
                 matched: 1,
                 total: 2

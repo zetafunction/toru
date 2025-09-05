@@ -44,7 +44,7 @@ impl MoveArgs {
         let source_files = fs::collect_files(&source)?;
 
         // TODO: Abstract this out so multiple torrent client backends can be used.
-        let torrents = sycli::filter_torrents(sycli::get_torrents()?, &source_files)?;
+        let torrents = sycli::filter_torrents(&sycli::get_torrents()?, &source_files)?;
 
         let pause_torrents = || -> anyhow::Result<()> {
             for torrent in &torrents {

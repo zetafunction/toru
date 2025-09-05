@@ -17,7 +17,7 @@ impl FindArgs {
         let files = fs::collect_files(&path)?;
 
         // TODO: Abstract this out so multiple torrent client backends can be used.
-        let torrents = sycli::filter_torrents(sycli::get_torrents()?, &files)?;
+        let torrents = sycli::filter_torrents(&sycli::get_torrents()?, &files)?;
 
         println!(
             "Found {} torrent(s) seeded from {}",

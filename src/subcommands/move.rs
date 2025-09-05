@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail};
 use clap::{Args, ValueEnum};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -19,6 +19,10 @@ pub struct MoveArgs {
     /// How to move the files.
     #[arg(default_value = "copy-and-unlink", long, value_enum)]
     strategy: Strategy,
+
+    /// A directory with symlinks to update. May be specified multiple times.
+    #[arg(long = "symlink_dir")]
+    symlink_dir: Vec<PathBuf>,
 }
 
 #[derive(Copy, Clone, Default, ValueEnum)]
@@ -44,15 +48,47 @@ impl MoveArgs {
         let source_files = fs::collect_files(&source)?;
 
         // TODO: Abstract this out so multiple torrent client backends can be used.
-        let torrents = sycli::filter_torrents(&sycli::get_torrents()?, &source_files)?;
+        let unfiltered_torrents = sycli::get_torrents()?;
+        let torrents = sycli::filter_torrents(&unfiltered_torrents, &source_files)?;
 
-        let pause_torrents = || -> anyhow::Result<()> {
-            for torrent in &torrents {
-                eprintln!("pausing {}", torrent.id);
-                sycli::pause_torrent(&torrent.id)?;
-            }
-            Ok(())
-        };
+        if let Some(torrent) = torrents.iter().find(|torrent| torrent.progress != 1.0) {
+            bail!("{} is incomplete; cannot move!", torrent.id);
+        }
+
+        let mut symlinks_to_update = HashMap::new();
+        for symlink_dir in self.symlink_dir {
+            symlinks_to_update.extend(
+                fs::collect_symlinks(&symlink_dir)?
+                    .into_iter()
+                    .filter(|(_, target_path)| source_files.contains_key(target_path)),
+            );
+        }
+        let symlinks_to_update = symlinks_to_update;
+        // TODO: filter_torrents() should probably take a HashSet since the length value isn't
+        // actually used.
+        let symlinks_for_filter = symlinks_to_update
+            .keys()
+            .map(|path| (path.clone(), 0))
+            .collect();
+
+        // These need to be paused while files are shuffled around to prevent broken links.
+        let symlinked_torrents =
+            sycli::filter_torrents(&unfiltered_torrents, &symlinks_for_filter)?;
+        if let Some(torrent) = symlinked_torrents
+            .iter()
+            .find(|torrent| torrent.progress != 1.0)
+        {
+            bail!("{} (symlinked) is incomplete; cannot move!", torrent.id);
+        }
+
+        for torrent in &torrents {
+            eprintln!("pausing {}", torrent.id);
+            sycli::pause_torrent(&torrent.id)?;
+        }
+        for torrent in &symlinked_torrents {
+            eprintln!("pausing {} (symlinked)", torrent.id);
+            sycli::pause_torrent(&torrent.id)?;
+        }
 
         let move_torrents = || -> anyhow::Result<()> {
             for torrent in &torrents {
@@ -67,39 +103,31 @@ impl MoveArgs {
             Ok(())
         };
 
-        let resume_torrents = || -> anyhow::Result<()> {
-            for torrent in &torrents {
-                eprintln!("resuming {}", torrent.id);
-                sycli::resume_torrent(&torrent.id)?;
-            }
-            Ok(())
-        };
-
         match self.strategy {
-            Strategy::Rename => move_files_with_rename(
-                &source,
-                &target,
-                pause_torrents,
-                move_torrents,
-                resume_torrents,
-            ),
+            Strategy::Rename => move_files_with_rename(&source, &target, move_torrents),
             Strategy::CopyAndUnlink => move_files_with_copy(&source, &target, move_torrents),
+        }?;
+
+        update_symlinks(&source, &target, &symlinks_to_update)?;
+
+        for torrent in &torrents {
+            eprintln!("resuming {}", torrent.id);
+            sycli::resume_torrent(&torrent.id)?;
         }
+
+        for torrent in &symlinked_torrents {
+            eprintln!("resuming {} (symlinked)", torrent.id);
+            sycli::resume_torrent(&torrent.id)?;
+        }
+
+        Ok(())
     }
 }
 
 // TODO: Add some tests, especially for the cross-device case.
-fn move_files_with_rename<P, M, R>(
-    source: &Path,
-    target: &Path,
-    pause_torrents: P,
-    move_torrents: M,
-    resume_torrents: R,
-) -> anyhow::Result<()>
+fn move_files_with_rename<M>(source: &Path, target: &Path, move_torrents: M) -> anyhow::Result<()>
 where
-    P: FnOnce() -> anyhow::Result<()>,
     M: FnOnce() -> anyhow::Result<()>,
-    R: FnOnce() -> anyhow::Result<()>,
 {
     let target_with_file_name = target.join(source.file_name().ok_or_else(|| {
         anyhow!(
@@ -114,10 +142,8 @@ where
         target_with_file_name.display()
     );
 
-    pause_torrents()?;
     std::fs::rename(source, &target_with_file_name)?;
-    move_torrents()?;
-    resume_torrents()
+    move_torrents()
 }
 
 fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
@@ -184,6 +210,32 @@ fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
     Ok(())
 }
 
+#[derive(Debug, Error)]
+enum UpdateSymlinksError {
+    #[error("not a prefix: {0}")]
+    NotAPrefix(#[from] std::path::StripPrefixError),
+    #[error("path {0} has no parent")]
+    NoParent(PathBuf),
+    #[error("IO error")]
+    Io(#[from] std::io::Error),
+}
+
+fn update_symlinks(
+    source: &Path,
+    target: &Path,
+    symlinks: &HashMap<PathBuf, PathBuf>,
+) -> Result<(), UpdateSymlinksError> {
+    let source_dir = source
+        .parent()
+        .ok_or_else(|| UpdateSymlinksError::NoParent(source.to_path_buf()))?;
+    for (symlink, symlink_target) in symlinks {
+        let new_symlink_target = target.join(symlink_target.strip_prefix(source_dir)?);
+        fs::create_or_update_symlink(symlink, &new_symlink_target)?;
+    }
+
+    Ok(())
+}
+
 // TODO: These error messages need improvement.
 #[derive(Debug, Error, PartialEq)]
 enum CalculateNewBasePathError {
@@ -242,6 +294,7 @@ fn calculate_new_base_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn calculate_new_base_path_with_single_file_torrent() {

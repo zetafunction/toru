@@ -23,6 +23,9 @@ pub struct MoveArgs {
     /// A directory with symlinks to update. May be specified multiple times.
     #[arg(long = "symlink_dir")]
     symlink_dir: Vec<PathBuf>,
+
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Copy, Clone, Default, ValueEnum)]
@@ -83,11 +86,15 @@ impl MoveArgs {
 
         for torrent in &torrents {
             eprintln!("pausing {}", torrent.id);
-            sycli::pause_torrent(&torrent.id)?;
+            if !self.dry_run {
+                sycli::pause_torrent(&torrent.id)?;
+            }
         }
         for torrent in &symlinked_torrents {
             eprintln!("pausing {} (symlinked)", torrent.id);
-            sycli::pause_torrent(&torrent.id)?;
+            if !self.dry_run {
+                sycli::pause_torrent(&torrent.id)?;
+            }
         }
 
         let move_torrents = || -> anyhow::Result<()> {
@@ -98,26 +105,41 @@ impl MoveArgs {
                     torrent.id,
                     new_path.display()
                 );
-                sycli::move_torrent(&torrent.id, &new_path)?;
+                if !self.dry_run {
+                    sycli::move_torrent(&torrent.id, &new_path)?;
+                }
             }
             Ok(())
         };
 
+        eprintln!(
+            "moving files from {} to {}",
+            source.display(),
+            target.display()
+        );
         match self.strategy {
-            Strategy::Rename => move_files_with_rename(&source, &target, move_torrents),
-            Strategy::CopyAndUnlink => move_files_with_copy(&source, &target, move_torrents),
+            Strategy::Rename => {
+                move_files_with_rename(self.dry_run, &source, &target, move_torrents)
+            }
+            Strategy::CopyAndUnlink => {
+                move_files_with_copy(self.dry_run, &source, &target, move_torrents)
+            }
         }?;
 
-        update_symlinks(&source, &target, &symlinks_to_update)?;
+        update_symlinks(self.dry_run, &source, &target, &symlinks_to_update)?;
 
         for torrent in &torrents {
             eprintln!("resuming {}", torrent.id);
-            sycli::resume_torrent(&torrent.id)?;
+            if !self.dry_run {
+                sycli::resume_torrent(&torrent.id)?;
+            }
         }
 
         for torrent in &symlinked_torrents {
             eprintln!("resuming {} (symlinked)", torrent.id);
-            sycli::resume_torrent(&torrent.id)?;
+            if !self.dry_run {
+                sycli::resume_torrent(&torrent.id)?;
+            }
         }
 
         Ok(())
@@ -125,7 +147,12 @@ impl MoveArgs {
 }
 
 // TODO: Add some tests, especially for the cross-device case.
-fn move_files_with_rename<M>(source: &Path, target: &Path, move_torrents: M) -> anyhow::Result<()>
+fn move_files_with_rename<M>(
+    dry_run: bool,
+    source: &Path,
+    target: &Path,
+    move_torrents: M,
+) -> anyhow::Result<()>
 where
     M: FnOnce() -> anyhow::Result<()>,
 {
@@ -142,15 +169,21 @@ where
         target_with_file_name.display()
     );
 
-    std::fs::rename(source, &target_with_file_name)?;
+    if !dry_run {
+        std::fs::rename(source, &target_with_file_name)?;
+    }
     move_torrents()
 }
 
-fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
+fn move_files_with_copy<M>(
+    dry_run: bool,
     source: &Path,
     target: &Path,
     move_torrents: M,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    M: FnOnce() -> anyhow::Result<()>,
+{
     let target_with_file_name = target.join(source.file_name().ok_or_else(|| {
         anyhow!(
             "could not extract file name component from {}",
@@ -178,33 +211,41 @@ fn move_files_with_copy<M: FnOnce() -> anyhow::Result<()>>(
         )
         .with_finish(ProgressFinish::AndLeave);
     if source.is_dir() {
-        fs_extra::dir::copy_with_progress(
-            source,
-            target,
-            &fs_extra::dir::CopyOptions::new(),
-            |process| {
-                progress.set_message(process.file_name);
-                progress.set_length(process.total_bytes);
-                progress.set_position(process.copied_bytes);
-                fs_extra::dir::TransitProcessResult::ContinueOrAbort
-            },
-        )?;
+        if !dry_run {
+            fs_extra::dir::copy_with_progress(
+                source,
+                target,
+                &fs_extra::dir::CopyOptions::new(),
+                |process| {
+                    progress.set_message(process.file_name);
+                    progress.set_length(process.total_bytes);
+                    progress.set_position(process.copied_bytes);
+                    fs_extra::dir::TransitProcessResult::ContinueOrAbort
+                },
+            )?;
+        }
         progress.finish();
         move_torrents()?;
-        std::fs::remove_dir_all(source)?;
+        if !dry_run {
+            std::fs::remove_dir_all(source)?;
+        }
     } else {
-        fs_extra::file::copy_with_progress(
-            source,
-            target_with_file_name,
-            &fs_extra::file::CopyOptions::new(),
-            |process| {
-                progress.set_length(process.total_bytes);
-                progress.set_position(process.copied_bytes);
-            },
-        )?;
+        if !dry_run {
+            fs_extra::file::copy_with_progress(
+                source,
+                target_with_file_name,
+                &fs_extra::file::CopyOptions::new(),
+                |process| {
+                    progress.set_length(process.total_bytes);
+                    progress.set_position(process.copied_bytes);
+                },
+            )?;
+        }
         progress.finish();
         move_torrents()?;
-        std::fs::remove_file(source)?;
+        if !dry_run {
+            std::fs::remove_file(source)?;
+        }
     }
 
     Ok(())
@@ -221,6 +262,7 @@ enum UpdateSymlinksError {
 }
 
 fn update_symlinks(
+    dry_run: bool,
     source: &Path,
     target: &Path,
     symlinks: &HashMap<PathBuf, PathBuf>,
@@ -230,7 +272,15 @@ fn update_symlinks(
         .ok_or_else(|| UpdateSymlinksError::NoParent(source.to_path_buf()))?;
     for (symlink, symlink_target) in symlinks {
         let new_symlink_target = target.join(symlink_target.strip_prefix(source_dir)?);
-        fs::create_or_update_symlink(symlink, &new_symlink_target)?;
+        eprintln!(
+            "updating symlink {} from {} to {}",
+            symlink.display(),
+            symlink_target.display(),
+            new_symlink_target.display()
+        );
+        if !dry_run {
+            fs::create_or_update_symlink(symlink, &new_symlink_target)?;
+        }
     }
 
     Ok(())

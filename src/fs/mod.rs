@@ -53,18 +53,34 @@ pub fn collect_files(path: &Path) -> Result<HashMap<PathBuf, u64>, CollectFilesE
     }
 }
 
-pub fn collect_symlinks(path: &Path) -> Result<Vec<PathBuf>, walkdir::Error> {
+#[derive(Debug, Error)]
+pub enum CollectSymlinksError {
+    #[error("WalkDir failed")]
+    WalkDir(#[from] walkdir::Error),
+    #[error("IO error")]
+    Io(#[from] std::io::Error),
+}
+
+/// Returns a map of symlinks found in `path` to their corresponding target path.
+pub fn collect_symlinks(path: &Path) -> Result<HashMap<PathBuf, PathBuf>, CollectSymlinksError> {
     walkdir::WalkDir::new(path)
         .into_iter()
-        .filter_map(|entry| match entry {
-            Ok(entry) => {
-                if entry.path_is_symlink() {
-                    Some(Ok(entry.into_path()))
-                } else {
-                    None
+        .filter_map(|entry| -> Option<Result<(_, _), CollectSymlinksError>> {
+            match entry {
+                Ok(entry) => {
+                    if entry.path_is_symlink() {
+                        let link_path = entry.into_path();
+                        let target_path = match std::fs::read_link(&link_path) {
+                            Ok(target_path) => target_path,
+                            Err(e) => return Some(Err(e.into())),
+                        };
+                        Some(Ok((link_path, target_path)))
+                    } else {
+                        None
+                    }
                 }
+                Err(e) => Some(Err(e.into())),
             }
-            Err(err) => Some(Err(err)),
         })
         .collect()
 }
@@ -149,7 +165,7 @@ mod tests {
 
         assert_eq!(
             collect_symlinks(tmp_dir.path()).unwrap(),
-            vec![symlink_path.clone()]
+            HashMap::from([(symlink_path.clone(), file_path.clone())])
         );
     }
 

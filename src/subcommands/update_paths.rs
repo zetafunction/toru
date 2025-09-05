@@ -39,8 +39,7 @@ impl UpdatePathsArgs {
         }
 
         for symlink_dir in self.symlink_dir {
-            for symlink in fs::collect_symlinks(&symlink_dir)? {
-                let original_target_path = std::fs::read_link(&symlink)?;
+            for (symlink, original_target_path) in fs::collect_symlinks(&symlink_dir)? {
                 if let Ok(remainder) = original_target_path.strip_prefix(&source) {
                     let new_target_path = target.join(remainder);
                     eprintln!(

@@ -188,8 +188,6 @@ pub fn move_torrent(torrent_id: &str, dir_path: &Path) -> Result<()> {
 pub enum FilterTorrentsError {
     #[error("{0:?} includes source and non-source files")]
     TorrentIncludesSourceAndNonSourceFiles(Torrent),
-    #[error("no torrents matched source files")]
-    NoMatchingTorrents,
     #[error("no torrent matched all source files: matched {matched} out of {total} source files")]
     DidNotMatchAllSourceFiles { matched: usize, total: usize },
 }
@@ -234,7 +232,6 @@ pub fn filter_torrents(
     }
 
     match (included_paths.len(), source_files.len()) {
-        (0, _) => Err(Error::NoMatchingTorrents),
         (matched, total) if matched == total => Ok(filtered_torrents),
         (matched, total) => Err(Error::DidNotMatchAllSourceFiles { matched, total }),
     }
@@ -301,10 +298,7 @@ mod tests {
             size: 123,
             files: HashMap::from([("test.txt".into(), 123)]),
         };
-        assert_eq!(
-            filter_torrents(&[torrent], &HashMap::new()),
-            Err(FilterTorrentsError::NoMatchingTorrents)
-        );
+        assert_eq!(filter_torrents(&[torrent], &HashMap::new()), Ok(vec![]));
     }
 
     #[test]
@@ -312,8 +306,16 @@ mod tests {
         let source_files = HashMap::from([("/tmp/test.txt".into(), 123)]);
         assert_eq!(
             filter_torrents(&[], &source_files),
-            Err(FilterTorrentsError::NoMatchingTorrents)
+            Err(FilterTorrentsError::DidNotMatchAllSourceFiles {
+                matched: 0,
+                total: 1
+            })
         );
+    }
+
+    #[test]
+    fn filter_torrents_with_no_torrents_or_source_files() {
+        assert_eq!(filter_torrents(&[], &HashMap::new()), Ok(vec![]));
     }
 
     #[test]

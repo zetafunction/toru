@@ -53,6 +53,9 @@ impl MoveArgs {
         // TODO: Abstract this out so multiple torrent client backends can be used.
         let unfiltered_torrents = sycli::get_torrents()?;
         let torrents = sycli::filter_torrents(&unfiltered_torrents, &source_files)?;
+        if torrents.is_empty() {
+            bail!("could not find torrents that matched {}", source.display());
+        }
 
         if let Some(torrent) = torrents.iter().find(|torrent| torrent.progress != 1.0) {
             bail!("{} is incomplete; cannot move!", torrent.id);

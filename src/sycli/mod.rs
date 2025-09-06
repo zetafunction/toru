@@ -210,13 +210,13 @@ pub fn filter_torrents(
             torrent
                 .files
                 .iter()
-                .fold((0, vec![]), |(included, mut missing), (path, _size)| {
+                .fold((0, vec![]), |(included, mut missing), (path, size)| {
                     let path = torrent.base_path.join(path);
                     if source_files.contains_key(&path) {
                         included_paths.insert(path);
                         (included + 1, missing)
                     } else {
-                        missing.push(path.clone());
+                        missing.push((path.clone(), *size));
                         (included, missing)
                     }
                 });
@@ -224,10 +224,12 @@ pub fn filter_torrents(
             // Torrent has no files specified in source files, so it is not interesting.
             continue;
         }
-        if included > 0 && missing.len() > 0 {
+        // Some torrent clients do not create actual files on disk for 0-byte files. This is
+        // probably a bug, but for now, this is non-fatal.
+        if included > 0 && !missing.is_empty() && missing.iter().any(|(_, size)| *size != 0) {
             return Err(Error::TorrentIncludesSourceAndNonSourceFiles(
                 torrent.id.clone(),
-                missing,
+                missing.into_iter().map(|(path, _)| path).collect(),
             ));
         }
         filtered_torrents.push(torrent.clone());
@@ -389,6 +391,117 @@ mod tests {
                 matched: 1,
                 total: 2
             }),
+        );
+    }
+
+    #[test]
+    fn filter_torrent_no_source_files() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        assert_eq!(filter_torrents(&[torrent], &HashMap::new()), Ok(vec![]),);
+    }
+
+    #[test]
+    fn filter_torrent_with_only_empty_file_matched() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "empty.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 0,
+            files: HashMap::from([("empty.txt".into(), 0)]),
+        };
+        let source_files = HashMap::from([("/tmp/empty.txt".into(), 0)]);
+        assert_eq!(
+            filter_torrents(&[torrent.clone()], &source_files),
+            Ok(vec![torrent])
+        );
+    }
+
+    #[test]
+    fn filter_torrent_with_only_empty_file_unmatched() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "test.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([("test.txt".into(), 123)]),
+        };
+        // If no files at all are matched, a torrent should not be considered matching.
+        let torrent2 = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "empty.txt".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 0,
+            files: HashMap::from([("empty.txt".into(), 0)]),
+        };
+        let source_files = HashMap::from([("/tmp/test.txt".into(), 0)]);
+        assert_eq!(
+            filter_torrents(&[torrent.clone(), torrent2], &source_files),
+            Ok(vec![torrent])
+        );
+    }
+
+    #[test]
+    fn filter_torrent_with_matched_non_empty_file_and_unmatched_empty_file() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "Test".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([
+                ("Test/nonempty.txt".into(), 123),
+                ("Test/empty.txt".into(), 0),
+            ]),
+        };
+        // Even though `empty.txt` is not specified in source paths, treat that as a match: some
+        // clients (buggily?) do not create files for 0-byte files.
+        assert_eq!(
+            filter_torrents(
+                &[torrent.clone()],
+                &HashMap::from([("/tmp/Test/nonempty.txt".into(), 123)])
+            ),
+            Ok(vec![torrent])
+        );
+    }
+
+    #[test]
+    fn filter_torrent_with_matched_non_empty_file_and_matched_empty_file() {
+        let torrent = Torrent {
+            id: "0123456789012345678901234567890123456789".into(),
+            name: "Test".into(),
+            base_path: "/tmp".into(),
+            progress: 1.0,
+            tracker_urls: vec!["https://example.com:9999".into()],
+            size: 123,
+            files: HashMap::from([
+                ("Test/nonempty.txt".into(), 123),
+                ("Test/empty.txt".into(), 0),
+            ]),
+        };
+        assert_eq!(
+            filter_torrents(
+                &[torrent.clone()],
+                &HashMap::from([
+                    ("/tmp/Test/nonempty.txt".into(), 123),
+                    ("/tmp/Test/empty.txt".into(), 0)
+                ])
+            ),
+            Ok(vec![torrent])
         );
     }
 }

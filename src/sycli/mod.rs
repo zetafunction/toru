@@ -186,8 +186,8 @@ pub fn move_torrent(torrent_id: &str, dir_path: &Path) -> Result<()> {
 // here for now...
 #[derive(Debug, Error, PartialEq)]
 pub enum FilterTorrentsError {
-    #[error("{0:?} includes source and non-source files")]
-    TorrentIncludesSourceAndNonSourceFiles(Torrent),
+    #[error("{0} includes non-source files {1:?}")]
+    TorrentIncludesSourceAndNonSourceFiles(String, Vec<PathBuf>),
     #[error("no torrent matched all source files: matched {matched} out of {total} source files")]
     DidNotMatchAllSourceFiles { matched: usize, total: usize },
 }
@@ -206,26 +206,28 @@ pub fn filter_torrents(
     let mut filtered_torrents = vec![];
     let mut included_paths = HashSet::new();
     for torrent in torrents {
-        let (included, not_included) =
+        let (included, missing) =
             torrent
                 .files
                 .iter()
-                .fold((0, 0), |(included, missing), (path, _size)| {
+                .fold((0, vec![]), |(included, mut missing), (path, _size)| {
                     let path = torrent.base_path.join(path);
                     if source_files.contains_key(&path) {
                         included_paths.insert(path);
                         (included + 1, missing)
                     } else {
-                        (included, missing + 1)
+                        missing.push(path.clone());
+                        (included, missing)
                     }
                 });
-        if not_included == torrent.files.len() {
+        if missing.len() == torrent.files.len() {
             // Torrent has no files specified in source files, so it is not interesting.
             continue;
         }
-        if included > 0 && not_included > 0 {
+        if included > 0 && missing.len() > 0 {
             return Err(Error::TorrentIncludesSourceAndNonSourceFiles(
-                torrent.clone(),
+                torrent.id.clone(),
+                missing,
             ));
         }
         filtered_torrents.push(torrent.clone());
@@ -360,7 +362,8 @@ mod tests {
         assert_eq!(
             filter_torrents(&[torrent.clone()], &source_files),
             Err(FilterTorrentsError::TorrentIncludesSourceAndNonSourceFiles(
-                torrent
+                torrent.id.clone(),
+                vec![PathBuf::from("/tmp/test2.txt")],
             ))
         );
     }

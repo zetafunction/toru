@@ -1,6 +1,62 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use console::Style;
 use thiserror::Error;
+
+// TODO: Migrate this to a plan-based system.
+pub trait Filesystem {
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    fn symlink(&self, original: &Path, link: &Path) -> std::io::Result<()>;
+}
+
+struct PosixFilesystem;
+
+impl Filesystem for PosixFilesystem {
+    fn symlink(&self, original: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(original, link)
+    }
+}
+
+fn get_default_instance() -> Box<dyn Filesystem> {
+    Box::new(PosixFilesystem {})
+}
+
+struct DryRunFilesystem;
+
+impl Filesystem for DryRunFilesystem {
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        let cyan = Style::new().cyan();
+        println!("creating directories at {}", cyan.apply_to(path.display()));
+        Ok(())
+    }
+
+    fn symlink(&self, original: &Path, link: &Path) -> std::io::Result<()> {
+        let cyan = Style::new().cyan();
+        let magenta = Style::new().magenta();
+        println!(
+            "symlinking {} to {}",
+            cyan.apply_to(link.display()),
+            magenta.apply_to(original.display())
+        );
+        Ok(())
+    }
+}
+
+fn get_dry_run_instance() -> Box<dyn Filesystem> {
+    Box::new(DryRunFilesystem {})
+}
+
+pub fn new_instance(dry_run: bool) -> Box<dyn Filesystem> {
+    if dry_run {
+        get_dry_run_instance()
+    } else {
+        get_default_instance()
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum CollectFilesError {

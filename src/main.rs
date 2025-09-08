@@ -2,6 +2,8 @@ mod config;
 mod fs;
 mod subcommands;
 mod sycli;
+mod torrent;
+mod util;
 
 use clap::{Parser, Subcommand};
 

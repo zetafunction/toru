@@ -1,12 +1,12 @@
 use anyhow::{anyhow, bail};
 use clap::{Args, ValueEnum};
-use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::fs;
 use crate::sycli;
+use crate::util;
 
 #[derive(Args)]
 pub struct MoveArgs {
@@ -204,15 +204,7 @@ where
     // to data loss!
     assert!(!target.starts_with(source));
 
-    let progress = ProgressBar::no_length()
-        .with_style(
-            ProgressStyle::with_template(
-                "{bytes} {elapsed_precise} [ {bytes_per_sec} ] [{wide_bar:.cyan/blue}] {percent}% ETA {eta_precise}",
-            )
-            .unwrap()
-            .progress_chars("=> "),
-        )
-        .with_finish(ProgressFinish::AndLeave);
+    let progress = util::new_progress_bar();
     if source.is_dir() {
         if !dry_run {
             fs_extra::dir::copy_with_progress(

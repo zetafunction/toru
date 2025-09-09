@@ -150,7 +150,10 @@ fn process_torrent(
         // hash checks in many common torrent clients.
         std::borrow::Cow::Borrowed(&torrent.info.pieces)
     };
-    let total_bytes = torrent.info.files.iter().map(|file| file.length).sum();
+    let total_bytes  = pieces
+        .iter()
+        .map(|piece| piece.file_slices.iter().map(|f| f.length).sum::<u64>())
+        .sum();
     let bar = util::new_progress_bar().with_message("hashing...");
     bar.set_length(total_bytes);
     let failed_paths: HashSet<_> = pieces

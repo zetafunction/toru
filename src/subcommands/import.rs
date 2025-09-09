@@ -163,6 +163,7 @@ fn process_torrent(
         .filter(|piece| !piece.check(&candidates).unwrap())
         .flat_map_iter(|piece| piece.file_slices.iter().map(|slice| &slice.path))
         .collect();
+    bar.finish_using_style();
     if !failed_paths.is_empty() {
         let failed_paths = failed_paths.into_iter().collect::<BTreeSet<_>>();
         let candidates = candidates.into_iter().collect::<BTreeMap<_, _>>();

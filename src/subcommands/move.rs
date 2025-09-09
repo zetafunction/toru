@@ -21,7 +21,7 @@ pub struct MoveArgs {
     strategy: Strategy,
 
     /// A directory with symlinks to update. May be specified multiple times.
-    #[arg(long = "symlink_dir")]
+    #[arg(long)]
     symlink_dir: Vec<PathBuf>,
 
     #[arg(long)]

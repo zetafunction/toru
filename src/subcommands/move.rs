@@ -10,8 +10,9 @@ use crate::util;
 
 #[derive(Args)]
 pub struct MoveArgs {
-    /// Source file or directory to move.
-    source: PathBuf,
+    /// Source file or directory to move. May be specified multiple times.
+    #[arg(required(true))]
+    sources: Vec<PathBuf>,
 
     /// Destination directory.
     target: PathBuf,
@@ -44,104 +45,107 @@ impl MoveArgs {
             bail!("target {} is not a directory", self.target.display());
         }
 
-        let source = std::path::absolute(self.source)?;
-        let source_is_file = source.is_file();
-        let target = std::path::absolute(self.target)?;
+        for source in &self.sources {
+            let source = std::path::absolute(source)?;
+            let source_is_file = source.is_file();
+            let target = std::path::absolute(&self.target)?;
 
-        let source_files = fs::collect_files(&source)?;
+            let source_files = fs::collect_files(&source)?;
 
-        // TODO: Abstract this out so multiple torrent client backends can be used.
-        let unfiltered_torrents = sycli::get_torrents()?;
-        let torrents = sycli::filter_torrents(&unfiltered_torrents, &source_files)?;
-        if torrents.is_empty() {
-            bail!("could not find torrents that matched {}", source.display());
-        }
-
-        if let Some(torrent) = torrents.iter().find(|torrent| torrent.progress != 1.0) {
-            bail!("{} is incomplete; cannot move!", torrent.id);
-        }
-
-        let mut symlinks_to_update = HashMap::new();
-        for symlink_dir in self.symlink_dir {
-            symlinks_to_update.extend(
-                fs::collect_symlinks(&symlink_dir)?
-                    .into_iter()
-                    .filter(|(_, target_path)| source_files.contains_key(target_path)),
-            );
-        }
-        let symlinks_to_update = symlinks_to_update;
-        // TODO: filter_torrents() should probably take a HashSet since the length value isn't
-        // actually used.
-        let symlinks_for_filter = symlinks_to_update
-            .keys()
-            .map(|path| (path.clone(), 0))
-            .collect();
-
-        // These need to be paused while files are shuffled around to prevent broken links.
-        let symlinked_torrents =
-            sycli::filter_torrents(&unfiltered_torrents, &symlinks_for_filter)?;
-        if let Some(torrent) = symlinked_torrents
-            .iter()
-            .find(|torrent| torrent.progress != 1.0)
-        {
-            bail!("{} (symlinked) is incomplete; cannot move!", torrent.id);
-        }
-
-        for torrent in &torrents {
-            eprintln!("pausing {}", torrent.id);
-            if !self.dry_run {
-                sycli::pause_torrent(&torrent.id)?;
+            // TODO: Abstract this out so multiple torrent client backends can be used.
+            let unfiltered_torrents = sycli::get_torrents()?;
+            let torrents = sycli::filter_torrents(&unfiltered_torrents, &source_files)?;
+            if torrents.is_empty() {
+                bail!("could not find torrents that matched {}", source.display());
             }
-        }
-        for torrent in &symlinked_torrents {
-            eprintln!("pausing {} (symlinked)", torrent.id);
-            if !self.dry_run {
-                sycli::pause_torrent(&torrent.id)?;
-            }
-        }
 
-        let move_torrents = || -> anyhow::Result<()> {
-            for torrent in &torrents {
-                let new_path = calculate_new_base_path(&source, source_is_file, &target, torrent)?;
-                eprintln!(
-                    "updating {} to directory {}",
-                    torrent.id,
-                    new_path.display()
+            if let Some(torrent) = torrents.iter().find(|torrent| torrent.progress != 1.0) {
+                bail!("{} is incomplete; cannot move!", torrent.id);
+            }
+
+            let mut symlinks_to_update = HashMap::new();
+            for symlink_dir in &self.symlink_dir {
+                symlinks_to_update.extend(
+                    fs::collect_symlinks(&symlink_dir)?
+                        .into_iter()
+                        .filter(|(_, target_path)| source_files.contains_key(target_path)),
                 );
+            }
+            let symlinks_to_update = symlinks_to_update;
+            // TODO: filter_torrents() should probably take a HashSet since the length value isn't
+            // actually used.
+            let symlinks_for_filter = symlinks_to_update
+                .keys()
+                .map(|path| (path.clone(), 0))
+                .collect();
+
+            // These need to be paused while files are shuffled around to prevent broken links.
+            let symlinked_torrents =
+                sycli::filter_torrents(&unfiltered_torrents, &symlinks_for_filter)?;
+            if let Some(torrent) = symlinked_torrents
+                .iter()
+                .find(|torrent| torrent.progress != 1.0)
+            {
+                bail!("{} (symlinked) is incomplete; cannot move!", torrent.id);
+            }
+
+            for torrent in &torrents {
+                eprintln!("pausing {}", torrent.id);
                 if !self.dry_run {
-                    sycli::move_torrent(&torrent.id, &new_path)?;
+                    sycli::pause_torrent(&torrent.id)?;
                 }
             }
-            Ok(())
-        };
-
-        eprintln!(
-            "moving files from {} to {}",
-            source.display(),
-            target.display()
-        );
-        match self.strategy {
-            Strategy::Rename => {
-                move_files_with_rename(self.dry_run, &source, &target, move_torrents)
+            for torrent in &symlinked_torrents {
+                eprintln!("pausing {} (symlinked)", torrent.id);
+                if !self.dry_run {
+                    sycli::pause_torrent(&torrent.id)?;
+                }
             }
-            Strategy::CopyAndUnlink => {
-                move_files_with_copy(self.dry_run, &source, &target, move_torrents)
+
+            let move_torrents = || -> anyhow::Result<()> {
+                for torrent in &torrents {
+                    let new_path =
+                        calculate_new_base_path(&source, source_is_file, &target, torrent)?;
+                    eprintln!(
+                        "updating {} to directory {}",
+                        torrent.id,
+                        new_path.display()
+                    );
+                    if !self.dry_run {
+                        sycli::move_torrent(&torrent.id, &new_path)?;
+                    }
+                }
+                Ok(())
+            };
+
+            eprintln!(
+                "moving files from {} to {}",
+                source.display(),
+                target.display()
+            );
+            match self.strategy {
+                Strategy::Rename => {
+                    move_files_with_rename(self.dry_run, &source, &target, move_torrents)
+                }
+                Strategy::CopyAndUnlink => {
+                    move_files_with_copy(self.dry_run, &source, &target, move_torrents)
+                }
+            }?;
+
+            update_symlinks(self.dry_run, &source, &target, &symlinks_to_update)?;
+
+            for torrent in &torrents {
+                eprintln!("resuming {}", torrent.id);
+                if !self.dry_run {
+                    sycli::resume_torrent(&torrent.id)?;
+                }
             }
-        }?;
 
-        update_symlinks(self.dry_run, &source, &target, &symlinks_to_update)?;
-
-        for torrent in &torrents {
-            eprintln!("resuming {}", torrent.id);
-            if !self.dry_run {
-                sycli::resume_torrent(&torrent.id)?;
-            }
-        }
-
-        for torrent in &symlinked_torrents {
-            eprintln!("resuming {} (symlinked)", torrent.id);
-            if !self.dry_run {
-                sycli::resume_torrent(&torrent.id)?;
+            for torrent in &symlinked_torrents {
+                eprintln!("resuming {} (symlinked)", torrent.id);
+                if !self.dry_run {
+                    sycli::resume_torrent(&torrent.id)?;
+                }
             }
         }
 
